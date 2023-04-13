@@ -1,14 +1,15 @@
-from audioop import error
+
 import re
-from forms import LoginForm
+
 import bcrypt
-from flask import Flask, g, jsonify,render_template, request,url_for,flash,redirect
+from flask import Flask, g, jsonify,render_template, request
 import psycopg2
 from flask_bcrypt import Bcrypt
 from flask_sqlalchemy import SQLAlchemy
-from forms import RegistrationForm
+
 import jwt
 import datetime
+from dotenv import load_dotenv
 import os
 import psycopg2
 from flask import Flask, request, jsonify
@@ -16,12 +17,17 @@ from flask_bcrypt import Bcrypt
 app = Flask(__name__)
 bcrypt = Bcrypt(app)
 
+load_dotenv()
+url = os.getenv('url')
+secret_key = os.getenv('secret_key')
+
+
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:GNanthu$2001@localhost/password'
+app.config['SQLALCHEMY_DATABASE_URI'] = url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 bcrypt= Bcrypt(app)
-app.config['SECRET_KEY']='33c7a01f8988502409176555d933e603'
+app.config['SECRET_KEY']=secret_key
 
 
 
@@ -29,12 +35,7 @@ app.config['SECRET_KEY']='33c7a01f8988502409176555d933e603'
 
 def get_db():
     if "db" not in g:
-        g.db = psycopg2.connect(
-            host="Localhost",
-            database="password",
-            user="postgres",
-            password="GNanthu$2001",
-        )
+        g.db = psycopg2.connect(url)
     return g.db
 
 
@@ -74,11 +75,9 @@ def login():
 
         new_data = {
             'email': req_data['email'],
-            'password': req_data['password'],
+            'password': req_data['password']
             
         }
-
-        
         try:
             
             cur.execute("SELECT password FROM users WHERE email = %s", (new_data['email'],))
@@ -92,39 +91,20 @@ def login():
             password_str = str(new_data['password'])
 
             if bcrypt.check_password_hash(password_hash, password_str):
-                token = jwt.encode({'user':new_data['email'],'exp':datetime.datetime.utcnow() + datetime.timedelta(minutes=2)},app.config['SECRET_KEY'])
+                token1 = jwt.encode({'user':new_data['email'],'exp':datetime.datetime.utcnow() + datetime.timedelta(minutes=100)},app.config['SECRET_KEY'])
                 cur.execute(
                     "UPDATE users SET salt = %s WHERE email = %s",
-                    (token.decode('utf-8'), new_data['email'])
+                    (token1.decode('utf-8'), new_data['email'])
                     )
-                
-
-                cur.execute(
-                    "SELECT salt FROM users WHERE email = %s",
-                    (new_data['email'],)
-                )
-                
-                result1 = cur.fetchone()
-                cur.close()
-                if result1 is not None:
-                    token = result1[0]
-                    try:
-                        # decode the JWT token to extract its payload
-                        payload = jwt.decode(token,app.config['SECRET_KEY'],algorithms=['HS256'])
-                        return jsonify({'TOKEN': payload})
-                    except jwt.ExpiredSignatureError:
-                        return jsonify(message="your Token has expired Login again "), 401
-                    except jwt.InvalidTokenError:
-                        return jsonify(message="Invalid token"), 401
-                else:
-                    return jsonify(message="Token not found"), 401
+                get_db().commit()
+                return jsonify(message="login successful"), 401
             else:
-                return jsonify(message="Login unsuccessful. Incorrect password."), 401
+                return jsonify(message="Login unsuccessful. Incorrect password"), 401
+        
 
         except (Exception, psycopg2.Error) as error:
                 print(f"Error during login: {error}")
                 return jsonify(message="Login unsuccessful. Please try again later."), 500
-
 
 
 
@@ -243,32 +223,57 @@ def index():
 def delete():
     cursor = get_cursor()
     req_data = request.get_json()
+    token = request.headers.get('Authorization')
+    
     if request.method == "DELETE":
         new_data = {
             'id': req_data['id']}
-    
+    if not token:
+        return jsonify({'message': 'Token is missing!'}), 401
     try:
-        cursor.execute("DELETE FROM curd WHERE id=%s", (new_data['id'],))
-        get_db().commit()
-        return jsonify(message="content deleted successful"), 405
-    except:
-         return jsonify(message= "there was a problem deleting that row")
+        if jwt.decode(token.split(" ")[1], app.config['SECRET_KEY'], algorithms=['HS256']):
+           cursor.execute("DELETE FROM curd WHERE id=%s", (new_data['id'],))
+           get_db().commit()
+           return jsonify(message="Content deleted successfully"), 200
+    except jwt.ExpiredSignatureError:
+        return jsonify(message="Your token has expired. Please login again."), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'message':token}), 401
+    
+    return jsonify(message="Content was not deleted"), 401
 
 
-@app.route("/update", methods=["PUT"])
+
+
+    
+
+
+
+
+
+
+@app.route("/update", methods=["PATCH"])
 def update():
     cursor = get_cursor()
     req_data = request.get_json()
-    if request.method == "PUT":
+    token = request.headers.get('Authorization')
+    if request.method == "PATCH":
         new_data = {
             'content': req_data['content'],
             'id':req_data['id']}
+        if not token:
+           return jsonify({'message': 'Token is missing!'}), 401
         try:
-            cursor.execute("UPDATE curd SET content=%s WHERE id=%s", (new_data['content'], new_data['id']))
-            get_db().commit()
-            return jsonify(message="updated successfully")
+            if jwt.decode(token.split(" ")[1], app.config['SECRET_KEY'], algorithms=['HS256']):
+              cursor.execute("UPDATE curd SET content=%s WHERE id=%s", (new_data['content'], new_data['id']))
+              get_db().commit()
+              return jsonify(message="updated successfully")
             # return redirect("/index/")
-        except:
+        except jwt.ExpiredSignatureError:
+           return jsonify(message="Your token has expired. Please login again."), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'message':token}), 401
+        else:
             return jsonify(message= "update have error")
     else:
         cursor.execute("SELECT * FROM curd")
@@ -280,6 +285,9 @@ def update():
 
 if __name__ =='__main__':
     app.run(debug=True)
+
+
+ 
 
 
  
