@@ -1,266 +1,177 @@
-
-
+from flask import Flask, request, redirect, session, jsonify,g
 import re
-
-import bcrypt
-from flask import Flask, g, jsonify,render_template, request
-import psycopg2
-from flask_bcrypt import Bcrypt
-from flask_sqlalchemy import SQLAlchemy
-import jwt
-import datetime
-from dotenv import load_dotenv
 import os
 import psycopg2
-from flask import Flask, request, jsonify
-from flask_bcrypt import Bcrypt
-app = Flask(__name__)
-bcrypt = Bcrypt(app)
+from functools import wraps
+import jwt
+import hashlib
+from dotenv import load_dotenv
+from datetime import timedelta
+from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 
 load_dotenv()
 url = os.getenv('url')
 secret_key = os.getenv('secret_key')
-
+jwt_secret_key= os.getenv('jwt_secret_key')
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
-bcrypt= Bcrypt(app)
-app.config['SECRET_KEY']=secret_key
-
+app.secret_key = secret_key
+app.config['JWT_SECRET_KEY'] = jwt_secret_key
+jwt = JWTManager(app)
 
 def get_db():
-    if "db" not in g:
-        g.db = psycopg2.connect(url)
+   
+    if 'db' not in g:
+        g.db = psycopg2.connect(url )
     return g.db
 
-
-def get_cursor():
-    if "cursor" not in g:
-        g.cursor = get_db().cursor()
-    return g.cursor
-
-
-@app.before_request
-def before_request():
-    get_db()
-    get_cursor()
-
-
-@app.teardown_request
-def teardown_request(exception):
-    db = g.pop("db", None)
+@app.teardown_appcontext
+def close_db(error):
+   
+    db = g.pop('db', None)
     if db is not None:
         db.close()
-    cursor = g.pop("cursor", None)
-    if cursor is not None:
-        cursor.close()
 
-@app.route('/login', methods=['POST'])
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    username = data["username"]
+    email = data["email"]
+    password = data["password"]
+    if not re.match(r'^[a-zA-Z0-9]{5,20}$', username):
+        return jsonify({"success": False, "message": "Username is invalid"}), 401
+    if not re.match(r'^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+        return jsonify({"success": False, "message": "Email is invalid"}), 401
+    if not re.match(r'^.{5,}$', password):
+        return jsonify({"success": False, "message": "Password is invalid"}), 401
+
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+
+    db = get_db()
+    cur = db.cursor()
+
+    # Check if username or email already exists in database
+    cur.execute(
+        "SELECT * FROM users WHERE username=%s OR email=%s",
+        (username, email)
+    )
+    user = cur.fetchone()
+
+    if user is not None:
+        cur.close()
+        db.close()
+        return jsonify({"success": False, "message": "Username or email already exists"})
+
+    # Insert data into database
+    cur.execute(
+        "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
+        (username, email, hashed_password)
+    )
+    db.commit()
+
+    cur.close()
+    db.close()
+
+    return jsonify({"success": True, "message": "Registration successful"})
+
+
+@app.route("/login", methods=["POST"])
 def login():
-    cur = get_cursor()
-    if request.method == 'POST':
-        req_data = request.get_json()
-        if not req_data:
-            return jsonify(message="No JSON data provided"), 400
+    data = request.get_json()
+    email = data["email"]
+    password = data["password"]
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
 
-        required_fields = ['email', 'password']
-        for field in required_fields:
-            if field not in req_data:
-                return jsonify(message=f"{field} is required"), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "SELECT * FROM users WHERE email=%s AND password=%s",
+        (email, hashed_password),
+    )
+    user = cur.fetchone()
+    cur.close()
+    db.close()
 
-        new_data = {
-            'email': req_data['email'],
-            'password': req_data['password']
-            
-        }
-        try:
-            
-            cur.execute("SELECT password FROM users WHERE email = %s", (new_data['email'],))
-            result = cur.fetchone()
-            
-
-            if result is None:
-                return jsonify(message="Login unsuccessful. Email address not found."), 401
-
-            password_hash = result[0]
-            password_str = str(new_data['password'])
-
-            if bcrypt.check_password_hash(password_hash, password_str):
-                token1 = jwt.encode({'user':new_data['email'],'exp':datetime.datetime.utcnow() + datetime.timedelta(minutes=100)},app.config['SECRET_KEY'])
-                cur.execute(
-                    "UPDATE users SET salt = %s WHERE email = %s",
-                    (token1.decode('utf-8'), new_data['email'])
-                    )
-                get_db().commit()
-                return jsonify(message="login successful"), 401
-            else:
-                return jsonify(message="Login unsuccessful. Incorrect password"), 401
-        
-
-        except (Exception, psycopg2.Error) as error:
-                print(f"Error during login: {error}")
-                return jsonify(message="Login unsuccessful. Please try again later."), 500
-
-
-
-@app.route('/registers', methods=['POST'])
-def create_user():
-    cur = get_cursor()
-    if request.method == 'POST':
-        req_data = request.get_json()
-        if not req_data:
-            return jsonify(message="No JSON data provided"), 400
-
-        required_fields = ['username', 'email', 'password']
-        for field in required_fields:
-            if field not in req_data:
-                return jsonify(message=f"{field} is required"), 400
-        
-        new_data = {
-            'username': req_data['username'],
-            'email': req_data['email'],
-            'password': req_data['password'],
-           
-        }
-        if len(new_data['username']) < 5:
-           return jsonify({'message': 'username should be at least 5 characters long.'}), 400
-       
-        if len(new_data['password']) < 8:
-            return jsonify({'message': 'Password should be at least 8 characters long.'}), 400
-        
-        if not re.search(r'[A-Z]', new_data['password']):
-            return jsonify({'message': 'Password should contain at least one uppercase letter.'}), 400
-
-        if not re.search(r'[a-z]', new_data['password']):
-            return jsonify({'message': 'Password should contain at least one lowercase letter.'}), 400
-
-        if not re.search(r'\d', new_data['password']):
-            return jsonify({'message': 'Password should contain at least one number.'}), 400
-
-        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', new_data['password']):
-            return jsonify({'message': 'Password should contain at least one special character.'}), 400
-        
-
-        conn = None
-        
-        try:
-           
-            cur.execute(
-                "SELECT id FROM users WHERE email = %s",
-                (new_data['email'],)
-            )
-            result = cur.fetchone()
-
-            if result is not None:
-                return jsonify(message="email already exists"), 409
-
-            password_hash = bcrypt.generate_password_hash(new_data['password']).decode('utf-8')
-         
-           
-            cur.execute(
-                "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
-                (new_data['username'], new_data['email'], password_hash)
-            )
-            get_db().commit()
-            return jsonify(message="account created successfully"), 201
-
-        finally:
-            if conn is not None:
-                conn.close()
-                
-
+    if user:
+        # Generate and return JWT access token
+        access_token = create_access_token(identity=user[0], expires_delta=timedelta(hours=1))
+        return jsonify({"success": True, "access_token": access_token})
     else:
-        return jsonify(message="Invalid method"), 405
+        return jsonify({"success": False, "message": "Invalid email or password"}), 401
+    # return jsonify("hi")
+@app.route("/dashboard")
+def dashboard():
+    if "user_id" in session:
+        db= get_db()
+        cur = db.cursor()
+        cur.execute(
+            "SELECT username, email FROM users WHERE id=%s",
+            (session["user_id"],),
+        )
+        user_data = cur.fetchone()
+        cur.close()
+        db.close()
 
-
-
-
-
-
-@app.route("/index", methods=["POST"])
-def index():
-    cursor = get_cursor()
-    req_data = request.get_json()
-    if request.method == "POST":
-        new_data = {
-            'content': req_data['content']}
-        
-        try:
-            cursor.execute("INSERT INTO curd (content) VALUES (%s)", (new_data['content'],))
-            get_db().commit()
-            return jsonify(message="content added successful"), 405
-            # return redirect("/index/")
-        except:
-            return jsonify(message= "there was a problem adding that row")
+    
+        user_dict = {"username": user_data[0], "email": user_data[1]}
+        return jsonify(user_dict)
     else:
-        cursor.execute("SELECT * FROM curd")
-        tasks = [{"id": task[0], "content": task[1]} for task in cursor.fetchall()]
-        return render_template("index.html", tasks=tasks)
-
-
-@app.route("/user", methods=["DELETE"])
-def delete():
-    cursor = get_cursor()
-    req_data = request.get_json()
-    token = request.headers.get('Authorization')
-    
-    if request.method == "DELETE":
-        new_data = {
-            'id': req_data['id']}
-    if not token:
-        return jsonify({'message': 'Token is missing!'}), 401
-    try:
-        if jwt.decode(token.split(" ")[1], app.config['SECRET_KEY'], algorithms=['HS256']):
-           cursor.execute("DELETE FROM curd WHERE id=%s", (new_data['id'],))
-           get_db().commit()
-           return jsonify(message="Content deleted successfully"), 200
-    except jwt.ExpiredSignatureError:
-        return jsonify(message="Your token has expired. Please login again."), 401
-    except jwt.InvalidTokenError:
-        return jsonify({'message':token}), 401
-    
-    return jsonify(message="Content was not deleted"), 401
-
-@app.route("/user", methods=["PATCH"])
-def update():
-    cursor = get_cursor()
-    req_data = request.get_json()
-    token = request.headers.get('Authorization')
-    if request.method == "PATCH":
-        new_data = {
-            'content': req_data['content'],
-            'id':req_data['id']}
-        if not token:
-           return jsonify({'message': 'Token is missing!'}), 401
-        try:
-            if jwt.decode(token.split(" ")[1], app.config['SECRET_KEY'], algorithms=['HS256']):
-              cursor.execute("UPDATE curd SET content=%s WHERE id=%s", (new_data['content'], new_data['id']))
-              get_db().commit()
-              return jsonify(message="updated successfully")
-           
-        except jwt.ExpiredSignatureError:
-           return jsonify(message="Your token has expired. Please login again."), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'message':token}), 401
+        return redirect("/")
+@app.route('/users/<int:user_id>', methods=["GET","DELETE","PATCH"])
+@jwt_required()
+def user(user_id):
+    if request.method == "GET":
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT * FROM users WHERE id=%s",(user_id,))
+        user = cur.fetchone()
+        cur.close()
+        db.close()
+        if user:
+            user_dict = {"id": user[0], "username": user[1], "email": user[2]}
+            return jsonify(user_dict)
         else:
-            return jsonify(message= "update have error")
-    else:
-        cursor.execute("SELECT * FROM curd")
-        tasks = [{"id": task[0], "content": task[1]} for task in cursor.fetchall()]
-        return render_template("update.html", tasks=tasks)
-    
+            return jsonify({"message": "User not found"}), 404
+    elif request.method == "DELETE":
+        db = get_db()
+        cur = db.cursor()
+        cur.execute(
+            "DELETE FROM users WHERE id=%s",
+            (user_id,)
+        )
+        db.commit()
+        cur.close()
+        db.close()
+
+        return jsonify({"message": "User deleted successfully"})
+    elif request.method == "PATCH":
+        db = get_db()
+        cur = db.cursor()
+        data = request.json
+        username = data.get("username")
+        email = data.get("email")
+        # update the user details in the database
+        cur.execute('UPDATE users SET username=%s, email=%s WHERE id=%s', (username, email, user_id))
+        db.commit()
+
+        # fetch the updated user details from the database
+        cur.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+        row = cur.fetchone()
+
+        cur.close()
+        db.close()
+
+        if row is not None:
+            user = {"id": row[0], "username": row[1], "email": row[2]}
+            return jsonify(user)
+        else:
+            return jsonify({"message": "User not found"}), 404
 
 
 
-if __name__ =='__main__':
+@app.route("/logout")
+def logout():
+    session.pop("user_id", None)
+    return redirect("/")
+if __name__ == '__main__':
     app.run(debug=True)
-
-
- 
-
- 
-
-
- 
